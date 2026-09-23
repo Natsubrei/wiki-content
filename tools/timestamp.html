@@ -9,7 +9,7 @@ description: 时间戳与日期相互转换
     --ts-line: #e5e7eb;
     --ts-muted: #6b7280;
     margin-top: 0.25rem;
-    font-family: var(--sans);
+    font-family: var(--ui, "Noto Sans SC", sans-serif);
   }
   .ts-app * { box-sizing: border-box; }
   .ts-app label { color: var(--ts-muted); font-size: 0.8rem; font-weight: 500; }
@@ -21,7 +21,7 @@ description: 时间戳与日期相互转换
     border-radius: 0.6rem;
     background: #fff;
     color: #111827;
-    font: 0.95rem/1.5 var(--sans);
+    font: 0.95rem/1.5 var(--ui, "Noto Sans SC", sans-serif);
     padding: 0 0.75rem;
     box-shadow: none;
   }
@@ -44,7 +44,7 @@ description: 时间戳与日期相互转换
     border-radius: 0.6rem;
     background: #fff;
     color: #374151;
-    font: 0.875rem/1.2 var(--sans);
+    font: 0.875rem/1.2 var(--ui, "Noto Sans SC", sans-serif);
     padding: 0 0.85rem;
     cursor: pointer;
     white-space: nowrap;
@@ -116,10 +116,10 @@ description: 时间戳与日期相互转换
     align-items: end;
     margin-bottom: 0.7rem;
   }
-  .ts-row.a { grid-template-columns: 1fr 6.2rem 11rem auto auto; }
+  .ts-row.a { grid-template-columns: 1fr 6.5rem 12rem auto auto; }
   .ts-row.b { grid-template-columns: 1fr auto; }
-  .ts-row.c { grid-template-columns: 1fr 11rem auto; }
-  .ts-row.d { grid-template-columns: 1fr 6.2rem auto; }
+  .ts-row.c { grid-template-columns: 1fr 12rem auto; }
+  .ts-row.d { grid-template-columns: 1fr 6.5rem auto; }
   .ts-hr { border: 0; border-top: 1px solid var(--ts-line); margin: 1.25rem 0; }
   .ts-app .bad { border-color: #ef4444 !important; }
   @media (max-width: 800px) {
