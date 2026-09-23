@@ -124,9 +124,9 @@ description: 时间戳与日期相互转换
     align-items: end;
     margin-bottom: 0.7rem;
   }
-  .ts-row.a { grid-template-columns: 1fr 5rem 13rem auto auto; }
+  .ts-row.a { grid-template-columns: 1fr 5rem 15rem auto auto; }
   .ts-row.b { grid-template-columns: 1fr auto; }
-  .ts-row.c { grid-template-columns: 1fr 13rem auto; }
+  .ts-row.c { grid-template-columns: 1fr 15rem auto; }
   .ts-row.d { grid-template-columns: 1fr 5rem auto; }
   .ts-hr { border: 0; border-top: 1px solid var(--ts-line); margin: 1.25rem 0; }
   .ts-app .bad { border-color: #ef4444 !important; }
@@ -335,12 +335,35 @@ description: 时间戳与日期相互转换
     setTimeout(() => { btn.textContent = old; }, 900);
   }
 
+  function copyViaExec(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) throw new Error('copy');
+  }
+
   async function copy(text, btn) {
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        copyViaExec(text);
+      }
       flashCopy(btn);
     } catch {
-      btn.textContent = '复制失败';
+      try {
+        copyViaExec(text);
+        flashCopy(btn);
+      } catch {
+        const old = btn.textContent;
+        btn.textContent = '复制失败';
+        setTimeout(() => { btn.textContent = old; }, 900);
+      }
     }
   }
 
