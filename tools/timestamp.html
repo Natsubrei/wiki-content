@@ -19,11 +19,19 @@ description: 时间戳与日期相互转换
     height: 2.6rem;
     border: 1px solid var(--ts-line);
     border-radius: 0.6rem;
-    background: #fff;
+    background-color: #fff;
     color: #111827;
     font: 0.95rem/1.5 var(--ui, "Noto Sans SC", sans-serif);
     padding: 0 0.75rem;
     box-shadow: none;
+  }
+  .ts-app select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%236b7280' d='M1.2 1.4L6 6.2l4.8-4.8'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.65rem center;
+    background-size: 0.7rem;
+    padding-right: 1.7rem;
   }
   .ts-app input:focus,
   .ts-app select:focus,
@@ -31,7 +39,7 @@ description: 时间戳与日期相互转换
     outline: none;
     border-color: var(--ts-primary);
     box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
-    background: #fff;
+    background-color: #fff;
   }
   .ts-app button {
     appearance: none;
@@ -116,10 +124,10 @@ description: 时间戳与日期相互转换
     align-items: end;
     margin-bottom: 0.7rem;
   }
-  .ts-row.a { grid-template-columns: 1fr 6.5rem 12rem auto auto; }
+  .ts-row.a { grid-template-columns: 1fr 5rem 13rem auto auto; }
   .ts-row.b { grid-template-columns: 1fr auto; }
-  .ts-row.c { grid-template-columns: 1fr 12rem auto; }
-  .ts-row.d { grid-template-columns: 1fr 6.5rem auto; }
+  .ts-row.c { grid-template-columns: 1fr 13rem auto; }
+  .ts-row.d { grid-template-columns: 1fr 5rem auto; }
   .ts-hr { border: 0; border-top: 1px solid var(--ts-line); margin: 1.25rem 0; }
   .ts-app .bad { border-color: #ef4444 !important; }
   @media (max-width: 800px) {
@@ -153,8 +161,8 @@ description: 时间戳与日期相互转换
         <div>
           <label for="unix-unit">单位</label>
           <select id="unix-unit">
-            <option value="s">秒 (s)</option>
-            <option value="ms">毫秒 (ms)</option>
+            <option value="s">秒</option>
+            <option value="ms">毫秒</option>
           </select>
         </div>
         <div>
@@ -196,8 +204,8 @@ description: 时间戳与日期相互转换
         <div>
           <label for="out-unit">单位</label>
           <select id="out-unit">
-            <option value="s">秒 (s)</option>
-            <option value="ms">毫秒 (ms)</option>
+            <option value="s">秒</option>
+            <option value="ms">毫秒</option>
           </select>
         </div>
         <button type="button" class="copy" id="copy-unix">复制</button>
