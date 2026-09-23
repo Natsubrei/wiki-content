@@ -1,0 +1,406 @@
+---
+title: 时间戳转换
+description: 时间戳与日期相互转换
+---
+<style>
+  .ts-app {
+    --ts-primary: #10b981;
+    --ts-danger: #ef4444;
+    --ts-line: #e5e7eb;
+    --ts-muted: #6b7280;
+    margin-top: 0.25rem;
+    font-family: var(--sans);
+  }
+  .ts-app * { box-sizing: border-box; }
+  .ts-app label { color: var(--ts-muted); font-size: 0.8rem; font-weight: 500; }
+  .ts-app input[type="text"],
+  .ts-app select {
+    width: 100%;
+    height: 2.6rem;
+    border: 1px solid var(--ts-line);
+    border-radius: 0.6rem;
+    background: #fff;
+    color: #111827;
+    font: 0.95rem/1.5 var(--sans);
+    padding: 0 0.75rem;
+    box-shadow: none;
+  }
+  .ts-app input:focus,
+  .ts-app select:focus,
+  .ts-app textarea:focus {
+    outline: none;
+    border-color: var(--ts-primary);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+    background: #fff;
+  }
+  .ts-app button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    height: 2.6rem;
+    border: 1px solid var(--ts-line);
+    border-radius: 0.6rem;
+    background: #fff;
+    color: #374151;
+    font: 0.875rem/1.2 var(--sans);
+    padding: 0 0.85rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ts-app .copy { min-width: 5.25rem; }
+  .ts-app #pause { min-width: 3.6rem; }
+  .ts-app button:hover { background: #f9fafb; }
+  .ts-app .primary { border-color: var(--ts-primary); background: var(--ts-primary); color: #fff; }
+  .ts-app .primary:hover { background: #059669; }
+  .ts-app .danger { border-color: var(--ts-danger); background: var(--ts-danger); color: #fff; }
+  .ts-app .danger:hover { background: #dc2626; }
+  .ts-app .ghost { background: #eef2f0; border-color: transparent; }
+  .ts-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--ts-line);
+    border-radius: 0.85rem;
+    background: #f3f4f6;
+  }
+  .ts-status .cap { font-size: 0.75rem; color: var(--ts-muted); margin-bottom: 0.35rem; }
+  .ts-live {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .ts-app button.ts-stamp {
+    display: inline-flex;
+    align-items: baseline;
+    justify-content: flex-start;
+    border: 0;
+    background: none;
+    padding: 0;
+    height: auto;
+    min-width: 0;
+    font: 700 1.7rem/1.1 var(--mono, ui-monospace, monospace);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    color: #111827;
+    cursor: pointer;
+    box-shadow: none;
+  }
+  .ts-app button.ts-stamp:hover { color: var(--ts-primary); background: none; }
+  .ts-badge {
+    display: inline-block;
+    min-width: 2.5rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: #d1fae5;
+    color: #047857;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-align: center;
+  }
+  .ts-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .ts-block { margin: 1.15rem 0 0; }
+  .ts-title {
+    margin: 0 0 0.85rem;
+    color: #111827;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .ts-row {
+    display: grid;
+    gap: 0.6rem;
+    align-items: end;
+    margin-bottom: 0.7rem;
+  }
+  .ts-row.a { grid-template-columns: 1fr 6.2rem 11rem auto auto; }
+  .ts-row.b { grid-template-columns: 1fr auto; }
+  .ts-row.c { grid-template-columns: 1fr 11rem auto; }
+  .ts-row.d { grid-template-columns: 1fr 6.2rem auto; }
+  .ts-hr { border: 0; border-top: 1px solid var(--ts-line); margin: 1.25rem 0; }
+  .ts-app .bad { border-color: #ef4444 !important; }
+  @media (max-width: 800px) {
+    .ts-row.a, .ts-row.b, .ts-row.c, .ts-row.d { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="tool ts-app">
+  <div class="ts-status">
+    <div>
+      <div class="cap">当前时间戳</div>
+      <div class="ts-live">
+        <button type="button" class="ts-stamp" id="live-stamp" title="填入转换输入">—</button>
+        <span class="ts-badge" id="live-unit">秒</span>
+      </div>
+    </div>
+    <div class="ts-actions">
+      <button type="button" id="toggle-unit">切换单位</button>
+      <button type="button" class="copy" id="copy-live">复制</button>
+      <button type="button" class="danger" id="pause">暂停</button>
+    </div>
+  </div>
+
+    <section class="ts-block">
+      <h2 class="ts-title">时间戳转日期时间</h2>
+      <div class="ts-row a">
+        <div>
+          <label for="unix">时间戳</label>
+          <input id="unix" type="text" placeholder="输入时间戳" autocomplete="off" />
+        </div>
+        <div>
+          <label for="unix-unit">单位</label>
+          <select id="unix-unit">
+            <option value="s">秒 (s)</option>
+            <option value="ms">毫秒 (ms)</option>
+          </select>
+        </div>
+        <div>
+          <label for="unix-tz">时区</label>
+          <select id="unix-tz"></select>
+        </div>
+        <button type="button" class="ghost" id="fill-now">填入当前</button>
+        <button type="button" class="primary" id="to-date">转换</button>
+      </div>
+      <div class="ts-row b">
+        <div>
+          <label for="date-out">转换结果</label>
+          <input id="date-out" type="text" placeholder="转换结果" readonly />
+        </div>
+        <button type="button" class="copy" id="copy-date">复制</button>
+      </div>
+    </section>
+
+    <hr class="ts-hr" />
+
+    <section class="ts-block">
+      <h2 class="ts-title">日期时间转时间戳</h2>
+      <div class="ts-row c">
+        <div>
+          <label for="date-in">日期时间</label>
+          <input id="date-in" type="text" placeholder="2026-09-23 14:19:53" autocomplete="off" />
+        </div>
+        <div>
+          <label for="date-tz">时区</label>
+          <select id="date-tz"></select>
+        </div>
+        <button type="button" class="primary" id="to-unix">转换</button>
+      </div>
+      <div class="ts-row d">
+        <div>
+          <label for="unix-out">转换结果</label>
+          <input id="unix-out" type="text" placeholder="转换结果" readonly />
+        </div>
+        <div>
+          <label for="out-unit">单位</label>
+          <select id="out-unit">
+            <option value="s">秒 (s)</option>
+            <option value="ms">毫秒 (ms)</option>
+          </select>
+        </div>
+        <button type="button" class="copy" id="copy-unix">复制</button>
+      </div>
+    </section>
+</div>
+
+<script>
+  const COMMON = [
+    'Asia/Shanghai',
+    'UTC',
+    'Asia/Hong_Kong',
+    'Asia/Tokyo',
+    'Asia/Seoul',
+    'Asia/Singapore',
+    'Asia/Kolkata',
+    'Europe/London',
+    'Europe/Paris',
+    'Europe/Berlin',
+    'America/New_York',
+    'America/Chicago',
+    'America/Los_Angeles',
+    'America/Sao_Paulo',
+    'Australia/Sydney',
+  ];
+  const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const zones = [...new Set([localTz, ...COMMON, ...(Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : [])])];
+
+  const liveStamp = document.querySelector('#live-stamp');
+  const liveUnit = document.querySelector('#live-unit');
+  const unix = document.querySelector('#unix');
+  const unixUnit = document.querySelector('#unix-unit');
+  const unixTz = document.querySelector('#unix-tz');
+  const dateOut = document.querySelector('#date-out');
+  const dateIn = document.querySelector('#date-in');
+  const dateTz = document.querySelector('#date-tz');
+  const unixOut = document.querySelector('#unix-out');
+  const outUnit = document.querySelector('#out-unit');
+
+  let unit = 's';
+  let paused = false;
+
+  function fillZones(select) {
+    for (const z of zones) {
+      const opt = document.createElement('option');
+      opt.value = z;
+      opt.textContent = z;
+      select.append(opt);
+    }
+    select.value = 'Asia/Shanghai';
+  }
+  fillZones(unixTz);
+  fillZones(dateTz);
+
+  function pad(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function partsIn(date, timeZone) {
+    const bag = {};
+    for (const p of new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date)) {
+      if (p.type !== 'literal') bag[p.type] = p.value;
+    }
+    return bag;
+  }
+
+  function formatIn(date, timeZone) {
+    const t = partsIn(date, timeZone);
+    return `${t.year}-${t.month}-${t.day} ${t.hour}:${t.minute}:${t.second}`;
+  }
+
+  function fromZoned(y, mo, d, h, mi, s, timeZone) {
+    const target = Date.UTC(y, mo - 1, d, h, mi, s);
+    let t = target;
+    for (let i = 0; i < 4; i += 1) {
+      const p = partsIn(new Date(t), timeZone);
+      const shown = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+      t += target - shown;
+    }
+    const date = new Date(t);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function parseDate(raw, timeZone) {
+    const m = String(raw).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) {
+      const d = new Date(raw);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    return fromZoned(+m[1], +m[2], +m[3], +m[4], +m[5], +(m[6] || 0), timeZone);
+  }
+
+  function parseUnix(raw, asMs) {
+    const n = Number(String(raw).trim());
+    if (!Number.isFinite(n)) return null;
+    const ms = asMs || Math.abs(n) >= 1e12 ? n : n * 1000;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function stamp(date, asMs) {
+    return asMs ? String(date.getTime()) : String(Math.floor(date.getTime() / 1000));
+  }
+
+  function nowStamp() {
+    return stamp(new Date(), unit === 'ms');
+  }
+
+  function tick() {
+    if (paused) return;
+    liveStamp.textContent = nowStamp();
+    liveUnit.textContent = unit === 'ms' ? '毫秒' : '秒';
+  }
+
+  function flashCopy(btn) {
+    const old = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = old; }, 900);
+  }
+
+  async function copy(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+      flashCopy(btn);
+    } catch {
+      btn.textContent = '复制失败';
+    }
+  }
+
+  function toDate() {
+    unix.classList.remove('bad');
+    const date = parseUnix(unix.value, unixUnit.value === 'ms');
+    if (!date) {
+      unix.classList.add('bad');
+      dateOut.value = '';
+      return;
+    }
+    dateOut.value = formatIn(date, unixTz.value);
+  }
+
+  function toUnix() {
+    dateIn.classList.remove('bad');
+    const date = parseDate(dateIn.value, dateTz.value);
+    if (!date) {
+      dateIn.classList.add('bad');
+      unixOut.value = '';
+      return;
+    }
+    unixOut.value = stamp(date, outUnit.value === 'ms');
+  }
+
+  document.querySelector('#toggle-unit').addEventListener('click', () => {
+    unit = unit === 's' ? 'ms' : 's';
+    unixUnit.value = unit;
+    outUnit.value = unit;
+    tick();
+  });
+
+  document.querySelector('#pause').addEventListener('click', (event) => {
+    paused = !paused;
+    event.currentTarget.textContent = paused ? '继续' : '暂停';
+    event.currentTarget.classList.toggle('danger', !paused);
+  });
+
+  document.querySelector('#copy-live').addEventListener('click', (event) => {
+    copy(liveStamp.textContent, event.currentTarget);
+  });
+
+  liveStamp.addEventListener('click', () => {
+    unix.value = liveStamp.textContent;
+    unixUnit.value = unit;
+  });
+
+  document.querySelector('#fill-now').addEventListener('click', () => {
+    unix.value = nowStamp();
+    unixUnit.value = unit;
+    dateIn.value = formatIn(new Date(), dateTz.value);
+  });
+
+  document.querySelector('#to-date').addEventListener('click', toDate);
+  document.querySelector('#to-unix').addEventListener('click', toUnix);
+  unix.addEventListener('keydown', (e) => { if (e.key === 'Enter') toDate(); });
+  dateIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') toUnix(); });
+  outUnit.addEventListener('change', () => { if (unixOut.value) toUnix(); });
+
+  document.querySelector('#copy-date').addEventListener('click', (event) => {
+    if (dateOut.value) copy(dateOut.value, event.currentTarget);
+  });
+  document.querySelector('#copy-unix').addEventListener('click', (event) => {
+    if (unixOut.value) copy(unixOut.value, event.currentTarget);
+  });
+
+  tick();
+  setInterval(tick, 1000);
+  unix.value = nowStamp();
+  dateIn.value = formatIn(new Date(), dateTz.value);
+</script>

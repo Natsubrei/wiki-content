@@ -1,0 +1,194 @@
+---
+title: 文本对比
+description: 逐行比较两段文本
+wide: true
+---
+<style>
+  body:has(.diff-host) {
+    height: 100dvh;
+    overflow: hidden;
+  }
+  body:has(.diff-host) .site-footer { display: none; }
+  body:has(.diff-host) .page.wide {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin-top: 0.6rem;
+    margin-bottom: 0.6rem;
+  }
+  .tool {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin-top: 0.35rem;
+  }
+  .diff-bar {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 0.45rem;
+    flex: none;
+  }
+  .diff-bar .side {
+    flex: 1;
+    color: #64748b;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .diff-bar .sum {
+    color: #64748b;
+    font-size: 0.8rem;
+    font-family: var(--mono, ui-monospace, monospace);
+    font-weight: 400;
+  }
+  .diff-bar .side:last-child { text-align: right; }
+  .diff-host {
+    flex: 1;
+    min-height: 16rem;
+    border-radius: 0.7rem;
+    overflow: hidden;
+    background: #f8fafc;
+  }
+  .diff-host.err {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #b91c1c;
+    font-size: 0.9rem;
+  }
+  @media (max-width: 640px) {
+    body:has(.diff-host) { height: auto; overflow: auto; }
+    .diff-host { min-height: 70vh; }
+  }
+</style>
+
+<div class="tool">
+  <div class="diff-bar">
+    <div class="side">原文 <span class="sum" id="sum-a"></span></div>
+    <div class="side">对照 <span class="sum" id="sum-b"></span></div>
+  </div>
+  <div class="diff-host" id="diff">正在加载对比编辑器…</div>
+</div>
+
+<script>
+  const VS_CANDIDATES = [
+    'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs',
+    'https://unpkg.com/monaco-editor@0.52.2/min/vs',
+    'https://cdn.bootcdn.net/ajax/libs/monaco-editor/0.52.2/min/vs',
+  ];
+
+  const host = document.querySelector('#diff');
+  const sumA = document.querySelector('#sum-a');
+  const sumB = document.querySelector('#sum-b');
+  let editor = null;
+  let original = null;
+  let modified = null;
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.onload = () => resolve();
+      el.onerror = () => reject(new Error(src));
+      document.head.append(el);
+    });
+  }
+
+  async function loadMonaco() {
+    if (window.monaco) return VS_CANDIDATES[0];
+    let lastErr;
+    for (const vs of VS_CANDIDATES) {
+      try {
+        await loadScript(vs + '/loader.js');
+        window.require.config({ paths: { vs } });
+        await new Promise((resolve, reject) => {
+          window.require(['vs/editor/editor.main'], resolve, reject);
+        });
+        return vs;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('monaco');
+  }
+
+  function countChanges() {
+    if (!editor) return;
+    const changes = editor.getLineChanges() || [];
+    let del = 0;
+    let add = 0;
+    for (const ch of changes) {
+      if (ch.originalEndLineNumber >= ch.originalStartLineNumber && ch.originalEndLineNumber > 0) {
+        del += ch.originalEndLineNumber - ch.originalStartLineNumber + 1;
+      }
+      if (ch.modifiedEndLineNumber >= ch.modifiedStartLineNumber && ch.modifiedEndLineNumber > 0) {
+        add += ch.modifiedEndLineNumber - ch.modifiedStartLineNumber + 1;
+      }
+    }
+    sumA.textContent = del ? `−${del}` : '';
+    sumB.textContent = add ? `+${add}` : '';
+  }
+
+  async function boot() {
+    try {
+      const vs = await loadMonaco();
+      window.MonacoEnvironment = {
+        getWorkerUrl() {
+          const body = `self.MonacoEnvironment={baseUrl:'${vs}/../'};importScripts('${vs}/base/worker/workerMain.js');`;
+          return URL.createObjectURL(new Blob([body], { type: 'text/javascript' }));
+        },
+      };
+      host.replaceChildren();
+      window.monaco.editor.defineTheme('wiki-diff', {
+        base: 'vs',
+        inherit: true,
+        rules: [],
+        colors: {
+          'editor.background': '#f8fafc',
+          'diffEditor.insertedTextBackground': '#86efac99',
+          'diffEditor.removedTextBackground': '#fca5a599',
+          'diffEditor.insertedLineBackground': '#dcfce799',
+          'diffEditor.removedLineBackground': '#fee2e299',
+        },
+      });
+      original = window.monaco.editor.createModel('', 'plaintext');
+      modified = window.monaco.editor.createModel('', 'plaintext');
+      const gutter = {
+        glyphMargin: false,
+        lineDecorationsWidth: 8,
+        lineNumbersMinChars: 3,
+      };
+      editor = window.monaco.editor.createDiffEditor(host, {
+        theme: 'wiki-diff',
+        automaticLayout: true,
+        originalEditable: true,
+        readOnly: false,
+        renderSideBySide: true,
+        useInlineViewWhenSpaceIsLimited: false,
+        ignoreTrimWhitespace: false,
+        renderIndicators: true,
+        renderMarginRevertIcon: false,
+        wordWrap: 'on',
+        minimap: { enabled: false },
+        fontFamily: 'Fira Mono, ui-monospace, SF Mono, Menlo, Consolas, monospace',
+        fontSize: 14,
+        lineHeight: 22,
+        padding: { top: 8, bottom: 8 },
+        scrollBeyondLastLine: false,
+        renderOverviewRuler: true,
+        enableSplitViewResizing: true,
+        ...gutter,
+      });
+      editor.setModel({ original, modified });
+      editor.getOriginalEditor().updateOptions(gutter);
+      editor.getModifiedEditor().updateOptions(gutter);
+      editor.onDidUpdateDiff(countChanges);
+    } catch {
+      host.classList.add('err');
+      host.textContent = '对比编辑器加载失败，检查网络后刷新。';
+    }
+  }
+
+  boot();
+</script>
