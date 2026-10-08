@@ -1,6 +1,6 @@
 # Wiki 内容
 
-给 [Wiki](https://github.com/Natsubrei/wiki) 用的文章和小工具。网站程序在那个仓库，这里只有文件。
+给 [Wiki](https://github.com/Natsubrei/wiki) 用的文章和工具。
 
 Wiki 启动时通过 `POSTS_DIR`、`TOOLS_DIR` 指向这两个目录（Docker 则是把它们挂进容器）。请求页面时现场读取，所以：
 
