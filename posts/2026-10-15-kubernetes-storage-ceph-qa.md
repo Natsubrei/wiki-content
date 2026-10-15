@@ -885,11 +885,12 @@ A larger PVC is required
 - `42949672960` 就是问题 31 里那个虚拟盘大小，40 GiB
 - `1138166334` 是 PVC 的 **request**，等于 `1Gi × 1.06`。不是那块 PVC 的 capacity，它的 capacity 是 2Gi
 
-于是两条规则：
+于是两条规则。导入那条里的 6% 由 CDI 加在 request 上；克隆那条里没有新的 6%，它只是「目标不小于源」，而源如果是 DV 建的，它的 request 出生时就已经被放大过了：
 
 ```text
 导入   用户请求 × (1 + filesystemOverhead) ≥ 虚拟盘大小
-克隆   克隆请求 ≥ 用户请求 × (1 + filesystemOverhead)
+克隆   克隆请求 ≥ 源 PVC 的 request
+       └ 源若是 DV 建的，这个 request 就等于 用户请求 × (1 + filesystemOverhead)
 ```
 
 代入一组实测（虚拟盘 40 GiB，overhead 0.06）：
@@ -898,21 +899,35 @@ A larger PVC is required
 | --- | --- | --- | --- | --- |
 | 1Gi | 1.06 GiB | 2Gi | 否 | — |
 | 39Gi | 41.34 GiB | 42Gi | 是 | 够 |
+| 40Gi | 42.4 GiB | 43Gi | 是 | 不够，要 43Gi |
 | 42Gi | 44.52 GiB | 45Gi | 是 | 不够，要 45Gi |
+
+**request 到 capacity 是向上取整到整 GiB。** 表格第一行就是证据：request 是 1.06 GiB，capacity 落在 2Gi，不是 1Gi。
+
+**反过来推想要的那个容量。** 要让 PV 落在 42Gi，request 必须落在 `(41, 42] GiB`，倒推回 DV 里写的数就是 `(38.68, 39.62]`——这个区间里只有一个整数 39。所以 39 不是魔数，是唯一能写的整数；写 40 就出界，PV 变 43Gi。
 
 **那 6% 只影响这两个数，不影响实占。** overhead 让 request 变大，PV 向上取整也跟着变大，但 RBD 是精简置备，多出来的容量不占空间。问题 30 里的池合计就是证据：声明 2.5 TiB，实占 208 GiB。
 
 所以想保住某个容量时，有三条路可走：
 
-1. **顺着 overhead 走。** 请求 42Gi，接受 45Gi 的 PV，把克隆尺寸也调到 45Gi。
+1. **顺着 overhead 走。** 请求 40Gi，接受 43Gi 的 PV，克隆尺寸也调到 43Gi 以上。
 2. **反向凑。** 请求 39Gi，request 是 41.34 GiB，PV 落在 42Gi，克隆 42Gi 就够。代价是引入一个只看 overhead 才说得通的数字。
-3. **把 overhead 置 0。** 改 `CDIConfig` 里这个 storage class 的 `filesystemOverhead`，请求多少就是多少。
+3. **把 overhead 置 0。** 改 `CDIConfig` 里这个 storage class 的 `filesystemOverhead`，请求多少就是多少。但声明 40GiB 的盘装不下 40GiB 的文件，importer 的校验会放行，写入时才 ENOSPC。
 
 第 3 条影响该 storage class 上此后所有的 DV 导入，动手前要清楚这一点。
 
 **overhead 不是一个多余的设计。** 文件系统本身要占一部分空间放元数据，声明 42Gi 的盘实际装不下 42Gi 的文件。CDI 用这个比例保证导入的文件放得进去。
 
-最后把这个结论接回引子：那份清单写的是 `storage: 42Gi`。按上面的规则，它会建成 45Gi 的 PV，克隆尺寸也得跟着调到 45Gi。
+最后把这个结论接回引子。引子里那块 42Gi 的盘最后是这么定的：
+
+```text
+DV 里写 storage: 40Gi
+  → PVC request 42.4 GiB
+  → PV 43Gi            ← 模板实际的大小
+  → 克隆尺寸取 45Gi     ← 比 43Gi 多留 2Gi
+```
+
+写 40Gi 是因为镜像的虚拟盘就是 40 GiB，这个数在清单里说得通。43Gi 和 45Gi 是它乘上 overhead、再向上取整之后的产物。
 
 ---
 
