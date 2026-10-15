@@ -810,34 +810,48 @@ scratch 的 storage class 取自 `CDIConfig` 的 `scratchSpaceStorageClass`；�
 
 **是 COW。** 实现方式是 RBD 快照加 `rbd clone`。
 
-证据取自一个正在被十几个克隆共享的模板：
+证据取自一条正在被十几个克隆共享的链。从链根一路数到克隆：
 
 ```text
-rbd info  <模板>
+rbd info <模板>
   op_features: clone-parent, clone-child, snap-trash
   parent: vm-pool/csi-vol-<...>-temp@<快照>
 
-rbd children <模板>
-  17 个子卷
-
 rbd du -p vm-pool
+  csi-vol-<链根>            声明 42 GiB   实占 40 GiB     ← 最下面那张，自己没有父
+  csi-vol-<模板>-temp       声明 42 GiB   实占 0 B
   csi-vol-<模板>            声明 42 GiB   实占 8 MiB
   csi-vol-<克隆>-temp       声明 42 GiB   实占 0 B
   csi-vol-<克隆>            声明 42 GiB   实占 1.4 GiB
 ```
 
-**每个逻辑克隆对应两块 RBD 镜像。** 控制器分两步：先把源快照 COW 克隆成一块临时镜像，再从临时镜像的快照 COW 克隆出目标镜像。
+**每个逻辑克隆对应两块 RBD 镜像。** 控制器分两步：先把源快照 COW 克隆成一块临时镜像，再从临时镜像的快照 COW 克隆出目标镜像。所以一条完整的链是五层：
 
 ```text
-csi-vol-<模板>                声明 42Gi   实占 8 MiB
-  └─ csi-vol-<克隆>-temp      声明 42Gi   实占 0 B
-       └─ csi-vol-<克隆>      声明 42Gi   实占 1.4 GiB   ← 虚拟机写出来的部分
+csi-vol-<链根>                      声明 42Gi   实占 40 GiB   ← 导入时写进去的数据
+  └─ csi-vol-<模板>-temp            声明 42Gi   实占 0 B
+       └─ csi-vol-<模板>            声明 42Gi   实占 8 MiB
+            └─ csi-vol-<克隆>-temp  声明 42Gi   实占 0 B
+                 └─ csi-vol-<克隆>  声明 42Gi   实占 1.4 GiB   ← 这台虚拟机写出来的部分
 ```
+
+**右边那列不是「这张图有多大」——每一层都是 42 GiB 的完整设备镜像。** 那是「这一层自己写了多少」。
+
+**`rbd du` 报的是「本层」。** 它只统计这个镜像自己占的对象，不含父层。要问「这条链一共占多少」，得沿 `parent` 一路加到链根。
+
+**粒度是 4 MiB 的对象。** 占用量正好等于「对象数 × 4 MiB」，一个字节不差：
+
+```text
+<模板>   本层    2 个对象 = 8 MiB
+<克隆>   本层  370 个对象 = 1.4 GiB        370 × 4 MiB = 1.445 GiB
+```
+
+所以客户机写 4 KiB，如果落在一个还住在父层的对象里，OSD 会把**整个 4 MiB 对象**复制到子层，再把这 4 KiB 应用上去。这是克隆第一次写到某片区域会慢一点的原因。
 
 三个后果：
 
-- **省空间是真的。** 克隆只付自己写出来的那些块。上面那块虚拟机用了 1.4 GiB，不是 42 GiB。整个池合计：声明 2.5 TiB，实占 208 GiB。
-- **模板不能随便删。** 父快照被保护，模板带着十几个活子卷时删不掉，要先删子卷或者 flatten。模板和克隆之间有依赖。
+- **省空间是真的。** 克隆只付自己写出来的那些块。上面那块虚拟机用了 1.4 GiB，不是 42 GiB。整个池合计：声明 2.6 TiB，实占 208 GiB。
+- **模板不能随便删。** 父快照被保护，模板带着十几个活子卷时删不掉，要先删子卷或者 flatten（机制见问题 36）。模板和克隆之间有依赖。
 - **COW 与 volumeMode 无关。** 它是 RBD 层的性质，Filesystem 和 Block 两种模式都省空间。
 
 顺带把一个容易混的印象分清：**从 URL 导入**是真的把字节写进去，**`dataSource` 克隆**是 COW。两者是不同的操作，开销不能放在一起比。
@@ -916,7 +930,7 @@ A larger PVC is required
 
 第 3 条影响该 storage class 上此后所有的 DV 导入，动手前要清楚这一点。
 
-**overhead 不是一个多余的设计。** 文件系统本身要占一部分空间放元数据，声明 42Gi 的盘实际装不下 42Gi 的文件。CDI 用这个比例保证导入的文件放得进去。
+**overhead 不是一个多余的设计。** 文件系统本身要占一部分空间放元数据，声明 42Gi 的盘实际装不下 42Gi 的文件。CDI 用这个比例保证导入的文件放得进去。（那层文件系统是谁建的，见问题 33。）
 
 最后把这个结论接回引子。引子里那块 42Gi 的盘最后是这么定的：
 
@@ -928,6 +942,232 @@ DV 里写 storage: 40Gi
 ```
 
 写 40Gi 是因为镜像的虚拟盘就是 40 GiB，这个数在清单里说得通。43Gi 和 45Gi 是它乘上 overhead、再向上取整之后的产物。
+
+### 问题 33：为什么 RBD 镜像上还有一个文件系统？
+
+问题 32 里那 6% 是给「文件系统元数据」留的——那是哪一个文件系统？
+
+因为文件系统可以叠好几层。客户机里那个只是**最里面**的一层，外面还有一层由宿主节点建，客户机不知道它存在。
+
+关键在于 `volumeMode: Filesystem` 这个选择作用在**宿主节点**上：kubelet 拿到 Ceph 给的裸设备后，按 StorageClass 里的 `csi.storage.k8s.io/fstype` 给它做一次 mkfs，再挂进 Pod。这一步发生在虚拟机启动之前，和客户机没有关系。
+
+实测，从一台正在运行的虚拟机里看到的：
+
+```text
+/dev/rbd5  ->  /var/run/kubevirt-private/vmi-disks/<disk>       ext4
+
+/var/run/kubevirt-private/vmi-disks/<disk>/
+  disk.img       42949672960 字节 = 40 GiB
+  lost+found/                                    ← ext4 根目录必有的东西
+```
+
+- `/dev/rbd5` 是 Ceph 交给节点的裸设备
+- `ext4` 是 kubelet 格式化上去的
+- `lost+found` 是 ext4 的标志，证明这一层确实是 ext4
+- `disk.img` 就是虚拟机的盘，一个 40 GiB 的文件
+
+**为什么要多这一层：** 因为要往里放一个文件。文件必须住在文件系统里。
+
+```text
+客户机的根文件系统              虚拟机内核管的。客户机以为这就是它的盘
+        ↑ 装在这个文件里
+disk.img / 40 GiB               Pod 里的一个普通文件
+        ↑ 住在这个文件系统上
+/dev/rbd5 上的 ext4             宿主节点的 kubelet 建的
+        ↑
+RBD 镜像                       COW 克隆
+        ↑
+RADOS 对象 / PG / OSD
+```
+
+**QEMU 读的恰好就是那个文件。** 它的命令行写得很明白：
+
+```text
+-blockdev
+{"driver":"file","filename":"/var/run/kubevirt-private/vmi-disks/<disk>/disk.img", ...}
+
+-device
+{"driver":"virtio-blk-pci-non-transitional", "drive":"libvirt-1-storage",
+ "id":"ua-<disk>", "bootindex":1, ...}
+```
+
+第一行：宿主把 `disk.img` 当**文件**打开，走的是外层 ext4。
+第二行：把它的字节当一块 `virtio-blk` 盘交给客户机，而且 `bootindex: 1`——客户机从它启动。
+
+所以客户机启动读的是 `disk.img` 的字节，压根不碰外层 ext4。外层 ext4 存在的唯一理由，是宿主需要能 `open()` 一个文件交给 QEMU。
+
+两块 ext4，建的层次不同：
+
+| 文件系统 | 谁建的 | 装什么 |
+| --- | --- | --- |
+| RBD 上的 ext4 | 宿主节点的 kubelet | 一个 `disk.img` |
+| 客户机里的文件系统 | 虚拟机内核 | `/etc`、`/bin` 这些 |
+
+`disk.img` 的前 8 字节是 `00 00 00 00 00 00 00 00`，不是 `QFI\xfb`。所以它不是 qcow2 了——导入时已经转成 raw。raw 的长度就等于虚拟盘大小，40 GiB 是这么来的，也对上了问题 31 里读到的那一个数。
+
+**顺带分清一个容易混的说法。** 「链根那 40 GiB」和「`disk.img` 那 40 GiB」是同一批字节的两个身份，但不是同一个东西：
+
+```text
+链根 40 GiB            Ceph 对象，块层的东西
+  → 组装成 /dev/rbd5
+      → 上面有外层 ext4
+          → 里面才有 disk.img 这个文件
+```
+
+差两层。「链根」是对象集合，「`disk.img`」是有路径有长度的文件。两个数碰巧都是 40 GiB，因为 `disk.img` 是那个文件系统里唯一的大东西。
+
+**外层 ext4 是在链的最开头建的，不在克隆层里。** 第一块 PVC 建出来、kubelet 第一次看到那块裸设备的时候，元数据就写进去了，落在链根。之后模板和克隆都是 COW 复制，ext4 已经在那儿了，kubelet 检测到有文件系统就直接挂，不会重做。所以克隆本层里只有客户机自己写的东西。
+
+**这一层和 COW 没有关系。** `layering` 和 `fstype` 并排躺在同一个 StorageClass 里：
+
+```text
+StorageClass/ceph-block 的 parameters:
+  imageFeatures                  layering     ← COW 的开关
+  imageFormat                    2
+  csi.storage.k8s.io/fstype      ext4         ← 文件系统类型
+```
+
+`layering` 是块层的：RBD 镜像带这一位才允许做 COW 克隆，克隆的 `op_features` 里会写 `clone-parent` / `clone-child`。
+
+上面那层 ext4 不削弱它。RBD 的 COW 作用在**块**这一层，只认「第 N 个块被写过没有」；上面盖的是 ext4、qcow2 还是裸数据，它不关心。
+
+「文件系统用不了 COW」这个印象多半来自 ext4 没有 reflink——XFS 和 btrfs 支持文件级的写时复制，ext4 不支持。那是文件系统层的 COW，和块层的这一套是两件事。
+
+### 问题 34：volumeMode 选 Filesystem 还是 Block？
+
+`volumeMode` 只有两个值，说的是**卷以什么形态交给容器**，不是「盘里存的是文件还是块」——两种模式的底层都是同一个 RBD 镜像，区别只在交给 Pod 之前做不做格式化。
+
+| | `Filesystem` | `Block` |
+| --- | --- | --- |
+| 交给容器的东西 | 一个目录 | 一个设备节点，如 `/dev/rbd5` |
+| kubelet 做的处理 | 建文件系统，再挂载 | 不格式化、不挂载 |
+| 容器里怎么用 | 按文件读写 | 直接读写块 |
+
+**这和前面那 6% 直接相关。** `filesystemOverhead` 的名字里就写着 Filesystem——只有存在外层文件系统时才需要它。选 Block 就没有那层 ext4，字节直接写进裸设备，request 是多少就是多少。
+
+实测问题 17 里那块 `cloud-image-dv`，它是 Block 模式：
+
+```text
+DV 里写          storage: 20Gi
+PVC 的 request   21474836480 字节 = 正好 20 GiB      ← 没有乘 1.06
+PVC 的 capacity  20Gi
+```
+
+对比问题 32 的表格：Filesystem 模式下写 `1Gi`，得到的 request 是 `1.06 GiB`。
+
+所以问题 32 里那些别扭的数字，根源就是选了 Filesystem。同一个 40 GiB 的镜像，Block 模式下写 `storage: 40Gi` 正好够，PV 就是 40Gi，不会出现 43Gi。
+
+**那为什么不换 Block。** 现网的 42 个 PVC 里 41 个是 `Filesystem`，包括三份模板和所有克隆。换一种不是改一个字段：模板要重建、后端生成克隆的那份模板也要改、已经跑着的虚拟机都是 Filesystem 的卷，两种模式会并存一段时间。要么全换，要么不换。
+
+**一个顺序造成的坑。** CDI 不写 `volumeMode` 时，从 StorageProfile 的 `claimPropertySets` 里挑第一条和 `accessModes` 相符的。这个 class 有三条：
+
+```text
+[0] ReadWriteMany / Block
+[1] ReadWriteOnce  / Block
+[2] ReadWriteOnce  / Filesystem
+```
+
+只写 `ReadWriteOnce` 会命中 `[1]`，拿到 **Block** 而不是 Filesystem——上面那块 `cloud-image-dv` 就是这么建的。**Filesystem 排在最后**，所以要它必须自己写明。
+
+### 问题 35：链根、模板、克隆是什么关系？
+
+问题 30 只画了链的一段。补上最下面那层，关系才完整。
+
+**链根**（一条 `parent` 链最底下那张图，自己没有父）是一块**完整的设备镜像**，它自己就能读。克隆不是——克隆只持有自己改动过的对象，缺的部分每次读都要向链根要。所以：
+
+- 链根能单独活
+- 克隆不能：链根没了，克隆读到一半就报 I/O 错误
+
+设备层看不见这个依赖。宿主看到 `/dev/rbd5` 就是一块完整的 42 GiB 盘，父子之间的穿梭在驱动里做掉了。只有链根被删的那一刻才暴露出来。
+
+**一个链根可以挂很多克隆，它们互相看不见。** 一台虚拟机删掉一个文件，另一台那边那个文件还在——删除只写进它自己那层。
+
+这个集群上的实际情况（从每块 PVC 沿 `parent` 追到根）：
+
+```text
+链根 A（40 GiB，本身也是 env-dev 的模板）      20 块 PVC
+  ├─ env-dev 的模板                          就是它自己
+  ├─ env-os 的模板
+  └─ env-os 的 18 台虚拟机
+
+链根 B（40 GiB，本身也是 env-test 的模板）      12 块 PVC
+  ├─ env-test 的模板
+  └─ env-test 的 11 台虚拟机
+```
+
+所以不是十几台共用一个链根，是**两个链根各管一批**。注意链根 A 同时也是 env-dev 的模板，env-os 整条链挂在它下面——跨命名空间，CSI 自己做不到，所以那是手工建出来的依赖。
+
+**各层相加可以超过设备大小。** 这是最容易算错的一处。取一个改得很猛的克隆（挂在链根 B 下面的）：
+
+```text
+链根      10289 个对象 = 40.2 GiB
+克隆       6026 个对象 = 23.5 GiB
+──────────────────────────────────
+各层相加                  63.7 GiB   ← 超过 42 GiB
+并集（重叠只算一次）       40.4 GiB   ← 设备里真正装了东西的部分
+差 = 重叠                 23.3 GiB
+```
+
+**那些层不是「装在 42 GiB 盒子里的东西」，是同一块盘的多个版本。** 克隆写过的区域，链根那份不会释放——对别的克隆还有用，对自己只是被遮住。链上对象之和记的是各层各自持有的量，被遮住的算两遍。
+
+所以「各层相加」没有上限关系（理论上可以到层数 × 42 GiB），只有「并集」才必须 ≤ 42 GiB。
+
+**而且那 6026 个对象里，5964 个（99%）盖在链根已有的区域上，只有 62 个是全新的。** 这台虚拟机几乎没往里加东西，它把原有的 23.3 GiB 重写了一遍。设备上的内容只多了 0.2 GiB，链上却多出 23.3 GiB。
+
+**本层占用是「改写累积」，不是「当前用量」。** 量一组同批的克隆：
+
+```text
+    248 MiB   ← 最安静的一台
+    724 MiB
+   1331 MiB
+   1434 MiB   ← 问题 30 那台
+   1536 MiB
+    ...
+   2560 MiB   ← 中位数 2.5 GiB
+    ...
+  24576 MiB   ← 最忙的一台
+```
+
+两个校准点：
+
+```text
+挂载过、从没启动过虚拟机     2 个对象   = 8 MiB
+跑了二十几天的一台虚拟机   370 个对象 = 1.4 GiB
+```
+
+所以这个数和客户机现在用了多少无关。它是「碰过的所有 4 MiB 对象之和」，删掉的文件不会把对象还回去。
+
+### 问题 36：COW 的开关在哪里？为什么模板删不掉？
+
+问题 30 说「父快照被保护」，但 `rbd snap ls` 在源图上返回空。快照在哪？
+
+```text
+rbd info <链根>
+  snapshot_count: 1
+  op_features: clone-parent, snap-trash
+
+rbd snap ls --all -p vm-pool <链根>
+  NAME                      SIZE    PROTECTED  NAMESPACE
+  a1b2c3d4-…-e5f6a7b8c9d0   42 GiB             trash (csi-vol-<模板>-temp)
+```
+
+**快照被移进了 trash 命名空间。** 所以普通列表里看不到，`PROTECTED` 那列也是空的——这一版不用老的 `rbd snap protect`，改成「快照进 trash + 子图引用它」。`op_features` 里的 `snap-trash` 就是它在用这个机制。
+
+于是一次 CSI 克隆 = **源图上一个快照（藏进 trash）+ 一张引用它的子图**。这把两件事解释清楚了：
+
+- **快照数 = 子卷数。** env-os 的模板上有 18 个 trash 快照，对应挂在它下面的 18 个克隆。快照的时间戳就是每个克隆建立的时刻。
+- **模板删不掉。** 那 18 个快照是 18 个克隆的锚点。子卷处理掉（删掉或者 flatten）之后，快照才会跟着走。
+
+**但 COW 不是池的开关。** 池里有 73 张 RBD 镜像：
+
+```text
+有父（会 COW）      60 张
+没有父（链根）      13 张   ← 两个链根 + 5 套 db-data/redis-data + 一块测试盘
+```
+
+只有有 `parent:` 的那 60 张才做 COW。链根本身是普通精简置备盘，不做任何复制。
+
+StorageClass 里的 `imageFeatures: layering` 只是**允许**在这张图上做快照和克隆——没有这一位，`rbd clone` 直接报错。它不会让每张图都变成 COW，决定 COW 的是**这张图有没有父**。
 
 ---
 
@@ -987,3 +1227,12 @@ DV 里写 storage: 40Gi
 | scratch PVC | 压缩源导入时额外需要的临时盘 |
 | `scratchSpaceStorageClass` | `CDIConfig` 里指定临时盘用哪个 storage class |
 | `filesystemOverhead` | `CDIConfig` 里的比例，给文件系统元数据留空间，会放大 PVC 的 request |
+| `volumeMode` | PVC 决定卷交给容器的形态。`Filesystem` 建文件系统再挂载，`Block` 直接给裸设备 |
+| `claimPropertySets` | StorageProfile 里列的可用组合。CDI 不写 `volumeMode` 时按顺序挑第一条相符的 |
+| `layering` | RBD 镜像的特性位。带这一位才允许 COW 克隆，由 StorageClass 的 `imageFeatures` 决定 |
+| `fstype` | StorageClass 参数。`volumeMode: Filesystem` 时用它决定格式化哪种文件系统 |
+| 链根 | 一条 `parent` 链最底下那张图，自己没有父。它是一块完整镜像，克隆靠它才能读 |
+| `trash` 快照 | 克隆用的快照被放进 trash 命名空间，普通 `rbd snap ls` 看不到，`--all` 才看得到 |
+| `op_features` | 镜像正在使用中的运营特性，例如 `clone-parent`、`snap-trash` |
+| `flatten` | 把父层内容复制进子图，断开 `parent`，之后子图能独立存在 |
+| `raw` | 未压缩的磁盘镜像，长度等于虚拟盘大小 |
