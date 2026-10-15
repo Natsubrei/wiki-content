@@ -25,7 +25,7 @@ TOOLS_DIR=../wiki-content/tools
 
 ## 文章
 
-`posts/<slug>.md` 会出现在 Wiki 的 `/blog/<slug>`。
+`posts/<YYYY-MM-DD>-<slug>.md` 会出现在 Wiki 的 `/blog/<slug>`。文件名的日期要和 frontmatter 的 `date` 一致。
 
 ```markdown
 ---
@@ -51,3 +51,17 @@ description: 一句话
 ```
 
 需要加宽版心时，在 frontmatter 里写 `wide: true`。
+
+## 检查
+
+`scripts/check.sh` 检查文件名日期、frontmatter 完整性、代码围栏成对，以及内部标识符。
+
+每次提交前自动跑，clone 后启用一次：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+不想用 hook 就直接跑 `scripts/check.sh`。
+
+内部标识符的词表在仓库根的 `.denylist`，一行一个 `grep -E` 正则。它不进仓库（仓库是公开的），clone 后自己建；缺这个文件时那一项会跳过。
