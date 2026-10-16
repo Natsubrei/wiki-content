@@ -5,29 +5,11 @@ date: 2026-10-15
 
 ## 引子
 
-我在一个 Kubernetes 集群上给内核调试实验铺存储。实验要起 KubeVirt 虚拟机，每台虚拟机需要一块 45Gi 的系统盘，上面预装好内核和工具链。
+以前给 KubeVirt 虚拟机铺系统盘，是 `virt-install` 装一遍再导入。基础镜像一改就重做。
 
-这块盘以前是自己装的：用 `virt-install` 起一台虚拟机，运行一遍发行版安装程序，装好内核和工具链，再把产出的磁盘镜像导入集群。装一次要等一次，基础镜像改一下就重做一遍。
+后来改用 CDI：一个 DataVolume，给 URL，下载、转格式、写 PVC 它都做。清单能写出来，字段在干什么不清楚——`dataSource` 谁实现、`ceph-block` 谁执行、盘落在哪几台机器上。
 
-最近才知道 CDI 可以直接把远端镜像导入成 PVC：写一个 DataVolume，给个 URL，下载、格式转换、写盘都由它做。
-
-照着模板能写出来，但每个字段在做什么，我说不清：
-
-```yaml
-spec:
-  storageClassName: ceph-block
-  dataSource:
-    name: vm-template
-    kind: PersistentVolumeClaim
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 45Gi
-```
-
-能创建成功，但我不清楚每一行在操作什么：`dataSource` 是谁在实现，`ceph-block` 由谁执行，磁盘到底落在哪几台机器上。
-
-本文把这条链上的概念逐个拆开，从 Kubernetes 的声明一路问到 Ceph 底层的字节。
+下面按这条链问下去。
 
 ---
 
@@ -397,28 +379,30 @@ PG 容量 ≈ 池里逻辑数据 / pg_num
 
 ```text
 对象大小      4194304 B = 4 MiB
-对象数        54.43k
-池逻辑数据    54.43k × 4 MiB ≈ 213 GiB    ← ceph 报 211 GiB ✓
+对象数        55.16k
+池逻辑数据    55.16k × 4 MiB ≈ 215 GiB    ← ceph 报 213 GiB ✓
 pg_num        128
 
-每 PG 容量    ≈ 213 GiB / 128 ≈ 1.66 GiB
-每 PG 对象数  ≈ 54420 / 128   ≈ 425 个
-每 PG 裸占    ≈ 1.66 × 3      ≈ 5.0 GiB   （3 副本）
+每 PG 容量    ≈ 215 GiB / 128 ≈ 1.68 GiB
+每 PG 对象数  ≈ 55160 / 128   ≈ 431 个
+每 PG 裸占    ≈ 1.68 × 3      ≈ 5.0 GiB   （3 副本）
 ```
 
 同一个池子有三个「占用」数字，差的是副本倍数，别混：
 
 ```text
-rbd du 的实占        211 GiB   各镜像本层之和，逻辑口径
-ceph 报的 STORED     211 GiB   同一个东西，Ceph 自己的算法
-ceph 报的 USED       630 GiB   约等于乘上 3 副本，真正吃掉裸容量的量
+rbd du 的实占        213 GiB   各镜像本层之和，逻辑口径
+ceph 报的 STORED     213 GiB   同一个东西，Ceph 自己的算法
+ceph 报的 USED       638 GiB   约等于乘上 3 副本，真正吃掉裸容量的量
 ```
+
+这几个数是同一次测量的快照。加一块盘、起一台虚拟机都会动，过一阵再看就不一样了。
 
 所以真正需要调的是 **`pg_num`**，不是「PG 大小」。想让每 PG 降到 1 GiB，就把 `pg_num` 翻倍。
 
 两个提醒：
 
-- 1.66 GiB 是**均值**。对象按名字哈希进 PG，分布不均匀，有的 PG 装四五百个对象，有的一百多。
+- 1.68 GiB 是**均值**。对象按名字哈希进 PG，分布不均匀，有的 PG 装四五百个对象，有的一百多。
 - PG 本身**没有 size 字段**。`ceph df` 只给池的总数，不会给单个 PG 的字节数。
 
 ### 问题 16：PG 和 OSD 的对应关系会不会漂？
@@ -503,9 +487,9 @@ CDI 拉这个 qcow2，在 importer 里转成 raw，再写进 20Gi 的 RBD。
 
 ### 问题 18：那这个平台走的是 DV 还是 PVC？
 
-**走的是 PVC，CDI 没参与。**
+**日常起虚拟机那次克隆走 PVC，CDI 没参与。** 从 URL 导新底才用 DV，那是后来的事（问题 29）。
 
-三条证据：
+当时的三条证据：
 
 ```text
 业务命名空间里只有 vm-template 这一个 PVC，没有任何 DV
@@ -525,9 +509,9 @@ storageprofile/ceph-block → cloneStrategy: csi-clone
 + 少一层控制器，代价是要求模板 PVC 同命名空间、同 StorageClass
 ```
 
-两者是替代关系，不是叠加。**要克隆就用 `dataSource` 让 CSI 干；要从外部拉镜像才需要 DV/CDI。**
+两者是替代关系，不是叠加。**要克隆就用 `dataSource` 让 CSI 干；要从外部拉镜像才需要 DV/CDI。** 日常新建虚拟机始终是前一条；后一条只在换基础镜像时走一遍。
 
-时间线也支持这个结论：CDI 是两天前刚装的，而模板 PVC 是 33 天和 126 天前建的。那些克隆不可能是 CDI 做的。
+时间线也支持这个结论：查克隆来源的时候，CDI 刚装两天，而当时在用的模板 PVC 已经 33 天和 126 天。那些克隆不可能是 CDI 做的。
 
 ---
 
@@ -550,14 +534,17 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
     osd: 24 osds: 24 up, 24 in
   data:
     pools:   2 pools, 129 pgs
-    objects: 54.43k objects, 211 GiB
-    usage:   667 GiB used, 2.3 TiB / 3 TiB avail
-    pgs:     129 active+clean
+    objects: 55.16k objects, 213 GiB
+    usage:   673 GiB used, 2.3 TiB / 3 TiB avail
+    pgs:     128 active+clean
+             1   active+clean+scrubbing+deep
 ```
 
 先看 `health`，再看 `pgs` 那行是不是全 `active+clean`。
 
 一个运维习惯：**`ceph -s` 里的 pg 状态比 `ceph health` 更早暴露问题**。`active+clean` 是健康终态；出现 `degraded`、`peering`、`remapped`、`undersized` 都说明有副本没到位。
+
+上面那行 `active+clean+scrubbing+deep` 不是异常——深层校验正在跑，基础状态仍是 `active+clean`。后缀常见的是 `scrubbing`、`snaptrim`、`backfill`。
 
 ### 问题 20：怎么看 OSD 分布在哪几台机器？
 
@@ -595,12 +582,12 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd df
 ```
 
 ```text
-ID  CLASS  WEIGHT   REWEIGHT  SIZE     RAW USE  DATA     OMAP     META     AVAIL    %USE   VAR   PGS
- 1    hdd  0.12500   1.00000  128 GiB   29 GiB   28 GiB   30 KiB  1.0 GiB   99 GiB  22.95  1.06   17
- 7    hdd  0.12500   1.00000  128 GiB   27 GiB   25 GiB   37 KiB  1.8 GiB  101 GiB  20.96  0.97   15
+ID  CLASS  WEIGHT   REWEIGHT  SIZE     RAW USE  DATA     OMAP     META      AVAIL    %USE   VAR   PGS  STATUS
+ 1    hdd  0.12500   1.00000  128 GiB   30 GiB   29 GiB   36 KiB  1013 MiB   98 GiB  23.12  1.06   17      up
+ 7    hdd  0.12500   1.00000  128 GiB   27 GiB   25 GiB   42 KiB   1.5 GiB  101 GiB  20.95  0.96   15      up
 ...
-                       TOTAL    3 TiB  667 GiB  630 GiB  808 KiB   36 GiB  2.3 TiB  21.70
-MIN/MAX VAR: 0.81/1.29  STDDEV: 3.67
+                       TOTAL    3 TiB  673 GiB  638 GiB  906 KiB    35 GiB  2.3 TiB  21.89
+MIN/MAX VAR: 0.82/1.28  STDDEV: 3.65
 ```
 
 几张表的信息不一样：
@@ -739,7 +726,8 @@ rados -p vm-pool stat <object>
 
 1. **模板 PVC 和新 PVC 在同一个命名空间**
 2. **两者用同一个 StorageClass**
-3. 新 PVC 的容量不小于模板（精确到字节的规则见问题 32）
+3. **两者 `volumeMode` 相同**（Filesystem 不能当 Block 的源，反过来也不行，问题 34）
+4. 新 PVC 的容量不小于模板（精确到字节的规则见问题 32）
 
 第 1 条是第 8 问里没提、但实际会限制用法的条件。它解释了为什么每个环境命名空间里都各存一份 `vm-template`：
 
@@ -782,11 +770,9 @@ tools 容器客户端：reef (18.x)
 
 ---
 
----
-
 ## 第六部分：导入与克隆，尺寸怎么定
 
-前面讲了 DV 和 CSI 克隆分别是什么。这一部分回答四个具体问题：导入过程中发生了什么、克隆是不是真的省空间、那堆看起来都叫「大小」的数字各自是什么、以及什么尺寸才够用。
+前面分开了两条路：日常克隆走 CSI，从 URL 拉镜像才走 DV。下面把导入、尺寸、`volumeMode` 和链一次问完。
 
 ### 问题 29：从 URL 导入一块 PVC，中间发生了什么？
 
@@ -814,6 +800,8 @@ scratch 的 storage class 取自 `CDIConfig` 的 `scratchSpaceStorageClass`；�
 ```
 
 实用结论：`progress` 停在 99.x% 不动不是卡住，是在把 qcow2 转成 raw。这个阶段按镜像里实际有多少数据耗时，不按虚拟盘大小。
+
+**写进去的那个 raw 就是 `disk.img`。** Filesystem 模式下，importer 把转换结果写成 PVC 上的这个文件；qcow2 只是下载来的源，转换完就没了。Block 模式下没有这个文件，raw 直接写进 RBD 块设备。
 
 ### 问题 30：CSI 克隆是全量复制还是 COW？
 
@@ -858,6 +846,14 @@ csi-vol-<链根>                      声明 43Gi   实占 2.0 GiB   ← 从 URL
 
 声明尺寸是「这块盘多大」，跟层与层之间的数据关系是两件事。
 
+**RBD 一步就能 clone，`-temp` 是 CSI 插进去的。** 45Gi 克隆 45Gi 时这张空图照样在，所以它不是为了改尺寸。
+
+CSI 要一张**永远不会被 map 到节点上**的图，专门用来 flatten。链太长时要把父层对象拷进某张图、断开 `parent`（见问题 36）；flatten 正在被虚拟机用的盘会卡住 IO。`-temp` 带 `deep-flatten`，最终那张（StorageClass 只开了 `layering`）没有。设计就是：flatten 临时图，不 flatten 给用户 map 的那张。
+
+尺寸差是两步的副产品：`rbd clone` 出来的图跟父一样大，所以 temp 继承源的声明尺寸；最终那张再 resize 到 PVC request。
+
+**只有写过的层才存 COW 内容。** temp 实占 0 B，没人往里写。链根是导入时写进去的全量，不是差量。KubeVirt / libvirt 不参与建链；它们只在有人开机往盘上写的时候出现（问题 38）。
+
 **`rbd du` 报的是「本层」。** 它只统计这个镜像自己占的对象，不含父层。要问「这条链一共占多少」，得沿 `parent` 一路加到链根。
 
 **粒度是 4 MiB 的对象。** 占用量正好等于「对象数 × 4 MiB」，一个字节不差：
@@ -871,7 +867,9 @@ csi-vol-<链根>                      声明 43Gi   实占 2.0 GiB   ← 从 URL
 
 三个后果：
 
-- **省空间是真的。** 克隆只付自己写出来的那些块。上面那块虚拟机用了 104 MiB，不是 45 GiB。整个池合计：声明 2.9 TiB，实占 211 GiB。
+- **省空间是真的。** 克隆只付自己写出来的那些块。上面那块虚拟机用了 104 MiB，不是 45 GiB。整个池合计：声明 3.0 TiB，实占 213 GiB。
+
+（声明按 **RBD 镜像**算。按 PVC 算只有 1.6 TiB，差额就是每张 `-temp`——它占着声明容量，却从来没人 mount。）
 - **模板不能随便删。** 父快照被保护，模板带着活子卷时删不掉，要先删子卷或者 flatten（机制见问题 36）。模板和克隆之间有依赖。
 - **COW 与 volumeMode 无关。** 它是 RBD 层的性质，Filesystem 和 Block 两种模式都省空间。
 
@@ -884,9 +882,9 @@ csi-vol-<链根>                      声明 43Gi   实占 2.0 GiB   ← 从 URL
 | 名称 | 含义 | 从哪来 | 谁决定 |
 | --- | --- | --- | --- |
 | 压缩包 | 下载体积 | HTTP `Content-Length` | 发布方的压缩 |
-| 虚拟盘大小 | 客户机看到的盘容量 | qcow2 头部偏移 `0x18` 的 8 字节 | 镜像制作者 |
+| 虚拟盘大小 | URL 上下来的 qcow2 声明的盘容量 | qcow2 头部偏移 `0x18` 的 8 字节 | 镜像制作者 |
 | 镜像实占 | 镜像里真正写过的块 | 精简置备 | 镜像内容 |
-| PVC request | 实际提交的存储申请 | DV 请求 × `(1 + filesystemOverhead)` | 集群配置 |
+| PVC request | 实际提交的存储申请 | Filesystem：DV 请求 × `(1 + filesystemOverhead)`；Block：等于 DV 里写的数 | 集群配置 |
 | PV capacity | 建出来的盘容量 | request 向上取整到 GiB | CSI 驱动 |
 | RBD 实占 | 真正占用的块 | 精简置备 + COW | 实际使用 |
 
@@ -902,9 +900,9 @@ xxd -l 64 head.bin
 #                            ↑cluster_bits  ↑size 从这里开始的 8 字节
 ```
 
-读出来的 `0x0000000A00000000` 是 `42,949,672,960`，即 40 GiB。**这个数才是「盘有多大」。**
+读出来的 `0x0000000A00000000` 是 `42,949,672,960`，即 40 GiB。**这是源镜像声明的盘有多大**，importer 拿它跟 PVC request 比。客户机后来看见的 vda 是不是这个数，取决于 `volumeMode`：Filesystem 下 `disk.img` 就是这么长；Block 下客户机看到的是整块 RBD，克隆申请更大时会超过 40 GiB（问题 34）。
 
-压缩包小、虚拟盘大，不矛盾：前者是数据被压缩后的体积，后者是客户机能用的容量。实占介于两者之间，取决于镜像是稀疏的还是带着真实数据。
+压缩包小、虚拟盘大，不矛盾：前者是数据被压缩后的体积，后者是镜像声明的容量。实占介于两者之间，取决于镜像是稀疏的还是带着真实数据。
 
 ### 问题 32：什么尺寸能导入，什么尺寸能克隆？
 
@@ -920,7 +918,7 @@ A larger PVC is required
 - `42949672960` 就是问题 31 里那个虚拟盘大小，40 GiB
 - `1138166334` 是 PVC 的 **request**，等于 `1Gi × 1.06`。不是那块 PVC 的 capacity，它的 capacity 是 2Gi
 
-于是两条规则。导入那条里的 6% 由 CDI 加在 request 上；克隆那条里没有新的 6%，它只是「目标不小于源」，而源如果是 DV 建的，它的 request 出生时就已经被放大过了：
+于是两条规则。**下面默认 Filesystem。** 导入那条里的 6% 由 CDI 加在 request 上；克隆那条里没有新的 6%，它只是「目标不小于源」，而源如果是 DV 建的，它的 request 出生时就已经被放大过了。Block 不乘 1.06，见问题 34。
 
 ```text
 导入   用户请求 × (1 + filesystemOverhead) ≥ 虚拟盘大小
@@ -941,7 +939,7 @@ A larger PVC is required
 
 **反过来推想要的那个容量。** 要让 PV 落在 42Gi，request 必须落在 `(41, 42] GiB`，倒推回 DV 里写的数就是 `(38.68, 39.62]`——这个区间里只有一个整数 39。所以 39 不是魔数，是唯一能写的整数；写 40 就出界，PV 变 43Gi。
 
-**那 6% 只影响这两个数，不影响实占。** overhead 让 request 变大，PV 向上取整也跟着变大，但 RBD 是精简置备，多出来的容量不占空间。问题 30 里的池合计就是证据：声明 2.9 TiB，实占 211 GiB。
+**那 6% 只影响这两个数，不影响实占。** overhead 让 request 变大，PV 向上取整也跟着变大，但 RBD 是精简置备，多出来的容量不占空间。问题 30 里的池合计就是证据：声明 3.0 TiB，实占 213 GiB。
 
 所以想保住某个容量时，有三条路可走：
 
@@ -962,15 +960,17 @@ DV 里写 storage: 40Gi
   → 克隆尺寸取 45Gi     ← 比 43Gi 多留 2Gi
 ```
 
-写 40Gi 是因为镜像的虚拟盘就是 40 GiB，这个数在清单里说得通。43Gi 和 45Gi 是它乘上 overhead、再向上取整之后的产物。
+写 40Gi 是因为镜像的虚拟盘就是 40 GiB，这个数在清单里说得通。43Gi 和 45Gi 是它乘上 overhead、再向上取整之后的产物。这是 Filesystem 那条路；同一份镜像用 Block 导入，DV 写 40Gi 就得到 40Gi 的 PV（问题 34）。
 
 ### 问题 33：为什么 RBD 镜像上还有一个文件系统？
 
-问题 32 里那 6% 是给「文件系统元数据」留的——那是哪一个文件系统？
+这一问只针对 `volumeMode: Filesystem`。Block 没有外层文件系统，也没有 `disk.img`（问题 34）。
 
-因为文件系统可以叠好几层。客户机里那个只是**最里面**的一层，外面还有一层由宿主节点建，客户机不知道它存在。
+问题 32 里那 6% 是 CDI 给外层文件系统留的垫子，**不是这层文件系统出现的原因**。`volumeMode: Filesystem` 才会让 CSI 对 RBD 做 mkfs；6% 只是预估格式化之后还剩多少给 `disk.img`。
 
-关键在于 `volumeMode: Filesystem` 这个选择作用在**宿主节点**上：kubelet 拿到 Ceph 给的裸设备后，按 StorageClass 里的 `csi.storage.k8s.io/fstype` 给它做一次 mkfs，再挂进 Pod。这一步发生在虚拟机启动之前，和客户机没有关系。
+文件系统可以叠好几层。客户机里那个只是**最里面**的一层，外面还有一层由宿主节点建，客户机不知道它存在。
+
+关键在于 `volumeMode: Filesystem`：CSI 节点插件把 RBD map 成 `/dev/rbdN` 之后，按 StorageClass 的 `csi.storage.k8s.io/fstype` 做 mkfs，再挂进 Pod。客户机不知道有这一步。
 
 实测，从一台正在运行的虚拟机里看到的：
 
@@ -982,8 +982,8 @@ DV 里写 storage: 40Gi
   lost+found/                                    ← ext4 根目录必有的东西
 ```
 
-- `/dev/rbd5` 是 Ceph 交给节点的裸设备
-- `ext4` 是 kubelet 格式化上去的
+- `/dev/rbd5` 是 CSI 节点插件 `rbd map` 出来的块设备
+- `ext4` 是导入时 CSI 节点插件 mkfs 上去的
 - `lost+found` 是 ext4 的标志，证明这一层确实是 ext4
 - `disk.img` 就是虚拟机的盘，一个 40 GiB 的文件
 
@@ -1026,18 +1026,18 @@ RADOS 对象 / PG / OSD
 
 `disk.img` 的前 8 字节是 `00 00 00 00 00 00 00 00`，不是 `QFI\xfb`。所以它不是 qcow2 了——导入时已经转成 raw。raw 的长度就等于虚拟盘大小，40 GiB 是这么来的，也对上了问题 31 里读到的那一个数。
 
-**顺带分清一个容易混的说法。** 「链根那 40 GiB」和「`disk.img` 那 40 GiB」是同一批字节的两个身份，但不是同一个东西：
+**`/dev/rbdN` 和 `disk.img` 不是同一个东西。** CSI 把 RBD 镜像 map 成块设备；ext4 做在这块设备上；`disk.img` 是这个文件系统里的一个文件。QEMU 打开的是文件，不碰 `/dev/rbdN`。
 
 ```text
-链根 40 GiB            Ceph 对象，块层的东西
-  → 组装成 /dev/rbd5
-      → 上面有外层 ext4
-          → 里面才有 disk.img 这个文件
+RBD 镜像              CSI 节点插件 rbd map 成 /dev/rbdN
+  → mkfs.ext4         导入时做过一次
+      → disk.img      40 GiB 的 raw 文件，QEMU 打开它
+          → 客户机的 vda
 ```
 
-差两层。「链根」是对象集合，「`disk.img`」是有路径有长度的文件。两个数碰巧都是 40 GiB，因为 `disk.img` 是那个文件系统里唯一的大东西。
+RBD 声明 43Gi，`disk.img` 40 GiB，差的是那 6% 垫子，不是两块盘。
 
-**外层 ext4 是在链的最开头建的，不在克隆层里。** 第一块 PVC 建出来、kubelet 第一次看到那块裸设备的时候，元数据就写进去了，落在链根。之后模板和克隆都是 COW 复制，ext4 已经在那儿了，kubelet 检测到有文件系统就直接挂，不会重做。所以克隆本层里只有客户机自己写的东西。
+**外层 ext4 是导入时建的，不在克隆层里。** importer Pod 第一次挂这块 PVC 时，CSI 节点插件对裸设备 mkfs.ext4，再把转换出来的 raw 写成 `disk.img`。之后开机只 map、只挂，不再 mkfs。模板和克隆是 COW，ext4 已经在链根里。克隆本层只有后来写过的块。开机这条挂载路径见问题 38。
 
 **这一层和 COW 没有关系。** `layering` 和 `fstype` 并排躺在同一个 StorageClass 里：
 
@@ -1060,9 +1060,10 @@ StorageClass/ceph-block 的 parameters:
 
 | | `Filesystem` | `Block` |
 | --- | --- | --- |
-| 交给容器的东西 | 一个目录 | 一个设备节点，如 `/dev/rbd5` |
-| kubelet 做的处理 | 建文件系统，再挂载 | 不格式化、不挂载 |
+| 交给容器的东西 | 一个目录 | 一个设备节点（KubeVirt 里是 `/dev/pvcdisk`） |
+| kubelet 做的处理 | 首次 mkfs，之后只挂载 | 不格式化、不挂载，映射设备 |
 | 容器里怎么用 | 按文件读写 | 直接读写块 |
+| 宿主上的块设备 | `/dev/rbdN`，被挂载 | `/dev/rbdN`，被映射进容器 |
 
 **这和前面那 6% 直接相关。** `filesystemOverhead` 的名字里就写着 Filesystem——只有存在外层文件系统时才需要它。选 Block 就没有那层 ext4，字节直接写进裸设备，request 是多少就是多少。
 
@@ -1076,9 +1077,47 @@ PVC 的 capacity  20Gi
 
 对比问题 32 的表格：Filesystem 模式下写 `1Gi`，得到的 request 是 `1.06 GiB`。
 
-所以问题 32 里那些别扭的数字，根源就是选了 Filesystem。同一个 40 GiB 的镜像，Block 模式下写 `storage: 40Gi` 正好够，PV 就是 40Gi，不会出现 43Gi。
+**但 Block 也躲不掉 6%，只是挪了个地方。** 用同一个 40 GiB 的镜像导两遍，只改 `volumeMode`：
 
-**那为什么不换 Block。** 现网的 47 个 PVC 里 46 个是 `Filesystem`，包括三份模板和所有克隆。换一种不是改一个字段：模板要重建、后端生成克隆的那份模板也要改、已经跑着的虚拟机都是 Filesystem 的卷，两种模式会并存一段时间。要么全换，要么不换。
+```text
+                    Filesystem                 Block
+DV 里写              storage: 40Gi               storage: 40Gi
+PVC 的 request       45,526,653,338 字节         42,949,672,960 字节
+                     ↑ 乘了 1.06                  ↑ 没乘
+PV 的 capacity       43Gi                       40Gi
+PV 的 fsType         ext4                       （空）
+里面                 ext4 + disk.img             raw 直接躺在块设备上
+```
+
+两边写进盘的字节完全相同——各读前 64 MiB 做哈希，值一样；MBR 分区表也一样。差别只在那层 ext4，和它带来的 3Gi。
+
+但这次导入的源是 `.xz` 压缩包，CDI 要开一块 scratch 先解开再转换。实测那块 scratch 是 **Filesystem** 模式的，43Gi，照样带着 1.06：
+
+```text
+prime     Block       40Gi    和目标是同模式
+scratch   Filesystem  43Gi    ← 压缩源才有，导完即回收
+```
+
+那张 Block 的底是一张独立的链根。同一套「克隆一层再开机改登录方式」的工序，在它上面也走得通——问题 37、问题 38。
+
+**一次克隆的两端不能混模式。** 源是 Filesystem，目标就不能是 Block，CSI 会拒。这和「集群里能不能两种都有」不是一回事：四十多个 Filesystem 和几块 Block 已经同时活着。旧虚拟机从旧模板克隆，碰不到一份还没人用的新模板。
+
+克隆 PVC 的 `volumeMode` 必须和源相同，清单里写明最稳妥。正在被克隆的旧模板要换模式，才是「要么全换，要么不换」——模式和模板得一起切。
+
+**客户机看见的盘有多大，两种模式不一样。** 这是选模式时真正要权衡的，不是那 6%。
+
+```text
+                    Filesystem                      Block
+kubelet             挂载                            映射设备（MapPodDevice）
+交给容器            一个目录                         /dev/pvcdisk
+libvirt             type='file'                     type='block'
+QEMU 打开           .../disk.img                    /dev/pvcdisk
+QEMU 参数           cache=none                      cache=none  io='native'
+客户机的 vda        = disk.img = 40G                = 整块 RBD = PVC 多大就多大
+多出来的容量        外层 ext4 里，客户机看不见       盘尾没分区的空间，客户机看得到
+```
+
+Filesystem 下 PVC 申请 45Gi，客户机仍然是 40G 的 vda——多的 5Gi 被外层 ext4 吃掉了。Block 下同一份 45Gi 克隆，客户机 `lsblk` 看到 45G 的 vda，分区仍是镜像里的 2G + 38G，后面约 5G 空着，可以扩。
 
 **一个顺序造成的坑。** CDI 不写 `volumeMode` 时，从 StorageProfile 的 `claimPropertySets` 里挑第一条和 `accessModes` 相符的。这个 class 有三条：
 
@@ -1106,22 +1145,25 @@ PVC 的 capacity  20Gi
 这个集群上的实际情况（从每块 PVC 沿 `parent` 追到根）：
 
 ```text
-链根 A（40 GiB，本身也是 env-dev 的模板）      21 块 PVC
+链根 A（PVC 42Gi，本层约 40 GiB；本身也是 env-dev 的模板）  21 块 PVC
   ├─ env-dev 的模板                          就是它自己
   ├─ env-dev 的 1 台虚拟机
   ├─ env-os 的模板
   └─ env-os 的 18 台虚拟机
 
-链根 B（40 GiB，本身也是 env-test 的模板）      12 块 PVC
+链根 B（PVC 42Gi，本层约 40 GiB；本身也是 env-test 的模板）  12 块 PVC
   ├─ env-test 的模板
   └─ env-test 的 11 台虚拟机
 
-链根 C（2.0 GiB，从 URL 导入的干净底）          3 块 PVC
+链根 C（PVC 43Gi，本层 2.0 GiB；Filesystem 干净底）          3 块 PVC
   ├─ env-dev 的新模板（45Gi）
   └─ env-dev 的 1 台虚拟机
+
+链根 D（PVC 40Gi，本层 1.8 GiB；同一份镜像 Block 导入）      2 块 PVC
+  └─ env-dev 的 Block 模板（45Gi）
 ```
 
-所以链根不止一个：每个环境都有自己的链，env-dev 因为新旧模板并存横跨两条。注意链根 A 同时也是 env-dev 的模板，env-os 整条链挂在它下面——跨命名空间，CSI 自己做不到，所以那是手工建出来的依赖。
+所以链根不止一个：每个环境都有自己的链，env-dev 因为新旧模板、两种 `volumeMode` 并存横跨几条。注意链根 A 同时也是 env-dev 的模板，env-os 整条链挂在它下面——跨命名空间，CSI 自己做不到，所以那是手工建出来的依赖。
 
 **链根和它上面那层之间，差的往往只是一次改动。** 链根是「原厂镜像的字节」，往上一层的模板是「在这块盘上又做了点事」，两者之差就是改动量：
 
@@ -1150,29 +1192,13 @@ PVC 的 capacity  20Gi
 
 **而且那 6026 个对象里，5964 个（99%）盖在链根已有的区域上，只有 62 个是全新的。** 这台虚拟机几乎没往里加东西，它把原有的 23.3 GiB 重写了一遍。设备上的内容只多了 0.2 GiB，链上却多出 23.3 GiB。
 
-**本层占用是「改写累积」，不是「当前用量」。** 量一组同批的克隆（前面那条 42 GiB 的旧链，26 台里排出来的）：
-
-```text
-    248 MiB   ← 最安静的一台
-    724 MiB
-   1331 MiB
-   1434 MiB
-   1536 MiB
-    ...
-   2560 MiB   ← 中位数 2.5 GiB
-    ...
-  24576 MiB   ← 最忙的一台
-```
-
-两个校准点：
+**本层占用是碰过的对象之和，不是客户机现在用了多少。** 删掉的文件不会把对象还回去。量级可以看这三个点：
 
 ```text
 只挂载过、从没启动虚拟机     2 个对象 = 8 MiB      旧链的模板，就格式化了一下
 刚建出来、开过一次机的一台克隆  26 个对象 = 104 MiB   新链
 在那块盘上做过一次改动        101 个对象 = 404 MiB  新链的模板
 ```
-
-所以这个数和客户机现在用了多少无关。它是「碰过的所有 4 MiB 对象之和」，删掉的文件不会把对象还回去。
 
 ### 问题 36：COW 的开关在哪里？为什么模板删不掉？
 
@@ -1195,11 +1221,13 @@ rbd snap ls --all -p vm-pool <链根>
 - **快照数 = 子卷数。** env-os 的模板上有 18 个 trash 快照，对应挂在它下面的 18 个克隆；新建的那份是 1 个，对应它唯一那台克隆。快照的时间戳就是每个克隆建立的时刻。
 - **模板删不掉。** 那 18 个快照是 18 个克隆的锚点。子卷处理掉（删掉或者 flatten）之后，快照才会跟着走——但**不是立刻**：删掉克隆的那一刻快照还在，过一会儿才消失。核对方法是比「活子卷数」和「trash 快照数」，现在三份模板两边都相等（18/18、11/11、2/2），说明没有泄漏。
 
-**但 COW 不是池的开关。** 池里有 80 张 RBD 镜像：
+**flatten 做什么。** 把父层里这份图还在用的对象拷进自己，然后断开 `parent`。之后这张图不依赖上面任何一层，父可以删。代价是差量变成自己持有一份完整拷贝。CSI 把这件事打在 `-temp` 上（问题 30），不打正在 map 给虚拟机的那张。
+
+**但 COW 不是池的开关。** 池里有 81 张 RBD 镜像：
 
 ```text
 有父（会 COW）      66 张
-没有父（链根）      14 张   ← 3 条链的链根 + 5 套 db-data/redis-data（10 块）+ 1 块测试盘
+没有父（链根）      15 张   ← 4 张模板底 + 5 套 db-data/redis-data（10 块）+ 1 块测试盘
 ```
 
 只有有 `parent:` 的那 66 张才做 COW。链根本身是普通精简置备盘，不做任何复制。
@@ -1230,9 +1258,71 @@ StorageClass 里的 `imageFeatures: layering` 只是**允许**在这张图上做
 | 旧链的模板 | 8 MiB | 不启动系统，直接改盘里的文件 |
 | 新链的模板 | 404 MiB | 启动一次系统，让它自己改 |
 
-差 50 倍，差的是开机副产物：日志、初始化状态，以及跟着写进盘的机器标识和 SSH 主机密钥。两种都达到了目的，但**起机改会把第一台机器的标识固化进模板**，之后所有克隆共用同一套。
+差 50 倍，差的是开机副产物：日志、初始化状态，以及跟着写进盘的机器标识和 SSH 主机密钥。两种都达到了目的。
 
 （旧链那 8 MiB 装不下一次开机，所以「离线改」是根据体积反推的，不是直接观测到的。）
+
+**改动不要写在链根上，先克隆一层。** 克隆是 COW，瞬间完成、0 字节，那几百 MiB 不管落在哪一层都一样大。差别是「还能不能回答链根是什么」：
+
+- 链根脏了只能重新导入。定制化要试错，没有干净的重来点。试过两个静默失败：cloud-init 的网络接口必须声明 `ports: [{port: 22}]`，否则 ssh 模块不跑；`ssh_pwauth` 只开 `PasswordAuthentication`，不会开 `PermitRootLogin`，两头都要做。
+- 每个环境、每种 `volumeMode` 都要各自一份模板（CSI 不能跨命名空间、也不能跨模式克隆）。第一台把底改了，后面几台就叠在第一台的口味上，链也往上堆。
+- 现在能说「这块是原厂镜像的字节，那块 404 MiB 是我的改动」，就是因为两者分属两层。
+
+Block 走同一套工序。同一份镜像、同一次开机改登录方式，Filesystem 那层 404 MiB，Block 那层 264 MiB——差的是两次开机写的量，不是模式本身。改完再克隆一台、**不带任何 cloud-init** 起起来，几十秒就能登进去，说明登录方式写在盘上，不是临时注入的。
+
+起机改会把 hostname、machine-id、SSH 主机密钥固化进模板，之后所有克隆共用。
+
+---
+
+## 第七部分：开机时盘怎么到虚拟机里
+
+### 问题 38：开机时谁把盘交给 QEMU？
+
+建链（问题 30）没有虚拟机。RBD 镜像已经在 Ceph 里，哪台节点都没 map。下面这些操作发生在 **VirtualMachine 变成 running、virt-launcher Pod 往节点上放的时候**，每次开机都做一遍。
+
+```text
+PVC 已经 Bound
+VirtualMachine running=true
+  virt-controller 建 virt-launcher Pod，把 PVC 写进 Pod.spec.volumes
+  调度到某节点
+  容器还不存在。kubelet 调 CSI 节点插件：
+    rbd map → /dev/rbdN
+    Filesystem：挂上已有的 ext4（不再 mkfs），bind-mount 进 Pod
+    Block：不 mkfs、不挂载，把设备节点映射进 Pod（MapPodDevice）
+  PodReadyToStartContainers
+  三个容器起。compute 里：
+    virt-launcher 写出 libvirt XML
+    Filesystem：<disk type='file'>   QEMU 打开 .../disk.img
+    Block：     <disk type='block'>  QEMU 打开 /dev/pvcdisk，io='native'
+  QEMU 对客户机模拟 virtio 盘 vda
+  客户机内核自己 mount 分区。它碰不到 /dev/rbdN
+```
+
+实测 Filesystem：调度之后大约 7 秒到 `PodReadyToStartContainers`，这 7 秒就是 `rbd map` 加挂载。容器是这一秒才起的。Block 同一条时间线，kubelet 事件里是 `MapPodDevice` 而不是挂载。
+
+PVC 是普通 Pod 卷，和别的应用挂 PVC 同一条路径。差别是容器里跑的是 hypervisor。客户机不是容器；被容器化的是 hypervisor。
+
+这台 Pod 三个容器，不是三台虚拟机：
+
+```text
+compute             virt-launcher + libvirt + QEMU     打开 disk.img 或 /dev/pvcdisk
+guest-console-log   收串口日志                          不碰盘
+hook-sidecar        钩子                                不碰盘
+```
+
+客户机里写一个文件，走的是同一条路反过来：
+
+```text
+客户机 write()
+  → 客户机内核写成对 vda 某扇区的写
+  → QEMU pwrite()
+       Filesystem：写进 disk.img → 宿主机 ext4 → /dev/rbdN
+       Block：    写进 /dev/pvcdisk → /dev/rbdN          ← 少一跳
+  → krbd 发给 OSD
+  → 这 4 MiB 对象还在父层：OSD 先拷到本层（copy-up），再改
+```
+
+关机反过来：QEMU 退出 → Pod 删掉 → kubelet umount 或取消设备映射 → `rbd unmap`。PVC 和 RBD 镜像还在，只是暂时没挂在任何节点上。Filesystem 的 `disk.img` 不是这一步创建的，导入时就写好了，克隆跟着过来。Block 没有这个文件，raw 就是块设备本身。
 
 ---
 
@@ -1283,7 +1373,7 @@ StorageClass 里的 `imageFeatures: layering` 只是**允许**在这张图上做
 | importer | CDI 起的 Pod。负责从 HTTP/S3/registry 拉数据并转换格式 |
 | qcow2 | QEMU 的磁盘镜像格式。CDI 导入时会转成 raw |
 | KubeVirt | 在 K8s 里运行虚拟机的方案。虚拟机是一种自定义资源 |
-| 虚拟盘大小 | qcow2 头部声明的盘容量。客户机看到的就是它 |
+| 虚拟盘大小 | URL 上下来的 qcow2 声明的盘容量。导入时 importer 按它校验。Filesystem 下 `disk.img` 就是这么长；Block 下客户机看到的是整块 RBD |
 | 精简置备 | 声明容量和实际占用是两回事。RBD 默认如此 |
 | COW | 写时复制。克隆只占用自己改动过的块 |
 | `rbd clone` | RBD 基于快照的 COW 克隆 |
@@ -1295,10 +1385,14 @@ StorageClass 里的 `imageFeatures: layering` 只是**允许**在这张图上做
 | `volumeMode` | PVC 决定卷交给容器的形态。`Filesystem` 建文件系统再挂载，`Block` 直接给裸设备 |
 | `claimPropertySets` | StorageProfile 里列的可用组合。CDI 不写 `volumeMode` 时按顺序挑第一条相符的 |
 | `layering` | RBD 镜像的特性位。带这一位才允许 COW 克隆，由 StorageClass 的 `imageFeatures` 决定 |
-| `fstype` | StorageClass 参数。`volumeMode: Filesystem` 时用它决定格式化哪种文件系统 |
+| `fstype` | StorageClass 参数。`volumeMode: Filesystem` 时用它决定格式化哪种文件系统。Block 模式下 PV 的这个字段是空的 |
 | 链根 | 一条 `parent` 链最底下那张图，自己没有父。它是一块完整镜像，克隆靠它才能读 |
 | 定制化层 | 模板相对链根多出来的那一层。模板 = 链根 + 这层改动，所以两者只差几十到几百 MiB |
 | `trash` 快照 | 克隆用的快照被放进 trash 命名空间，普通 `rbd snap ls` 看不到，`--all` 才看得到 |
 | `op_features` | 镜像正在使用中的运营特性，例如 `clone-parent`、`snap-trash` |
 | `flatten` | 把父层内容复制进子图，断开 `parent`，之后子图能独立存在 |
+| `-temp` | CSI 克隆时插的中间镜像。带 `deep-flatten`，专门挨 flatten，不给虚拟机 map |
+| `deep-flatten` | RBD 特性。有子图挂着也能 flatten。只有 `-temp` 开了，最终那张没有 |
+| copy-up | 第一次写某个还在父层的 4 MiB 对象时，OSD 先拷到本层再改 |
+| virt-launcher | KubeVirt 起的 Pod。里面跑 libvirt 和 QEMU。PVC 是它的普通卷 |
 | `raw` | 未压缩的磁盘镜像，长度等于虚拟盘大小 |
